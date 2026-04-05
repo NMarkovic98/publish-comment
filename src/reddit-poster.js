@@ -41,7 +41,6 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
   try {
     console.log("  [bot] Navigating to", redditUrl);
     await page.goto(redditUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await page.waitForTimeout(4000);
 
     // ── Block client-side navigation to /submit/ ──
     // Reddit uses pushState for SPA navigation. Override it to prevent
@@ -90,7 +89,6 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
       await page.locator('comment-composer-host').first().click({ timeout: 5000 });
     }
     console.log("  [bot] Trigger clicked, waiting for editor...");
-    await page.waitForTimeout(3000);
 
     // Verify URL didn't change
     console.log("  [bot] URL after trigger:", page.url());
@@ -110,14 +108,64 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
 
     // Click into the editor to ensure focus and toolbar is active
     await page.locator('div[contenteditable="true"][data-lexical-editor="true"]').first().click();
-    await page.waitForTimeout(1000);
 
     // ── Step 4: Upload image ──
     console.log("  [bot] Uploading image:", imagePath);
+
+    // Set up network listeners BEFORE triggering the upload so we don't miss anything.
+    // Reddit flow: POST /api/media/asset.json → returns S3 presigned URL →
+    // browser does POST (multipart) to reddit-uploaded-media.s3-accelerate.amazonaws.com
+    const assetPromise = page
+      .waitForResponse(
+        (r) => /\/api\/media\/asset\.json/.test(r.url()) && r.status() < 400,
+        { timeout: 30000 }
+      )
+      .catch(() => null);
+
+    const s3Promise = page
+      .waitForResponse(
+        (r) =>
+          /reddit-uploaded-media.*amazonaws\.com/.test(r.url()) &&
+          (r.request().method() === "POST" || r.request().method() === "PUT") &&
+          r.status() < 400,
+        { timeout: 180000 }
+      )
+      .catch(() => null);
+
     const uploaded = await uploadImage(page, imagePath);
     if (!uploaded) throw new Error("Failed to upload image");
-    console.log("  [bot] Image upload initiated, waiting for processing...");
-    await page.waitForTimeout(8000);
+    console.log("  [bot] Image upload initiated, waiting for network...");
+
+    const assetResp = await assetPromise;
+    console.log("  [bot] asset.json response:", assetResp ? "ok" : "not seen");
+    const s3Resp = await s3Promise;
+    console.log("  [bot] S3 upload response:", s3Resp ? "ok" : "not seen");
+
+    if (!s3Resp) {
+      // Fallback: wait for network idle in case Reddit changed the host
+      console.log("  [bot] S3 not matched, falling back to networkidle...");
+      try {
+        await page.waitForLoadState("networkidle", { timeout: 60000 });
+      } catch {}
+    }
+
+    // Small settle delay for Lexical to swap the blob for the CDN URL
+    await page.waitForTimeout(1500);
+
+    // ── Step 5: Add tip text below the image ──
+    console.log("  [bot] Typing tip text...");
+    try {
+      const tipText = paypalLink
+        ? `tip is appreciated :) ${paypalLink}`
+        : "tip is appreciated :)";
+      const editor = page.locator('div[contenteditable="true"][data-lexical-editor="true"]').first();
+      await editor.click();
+      await page.keyboard.press('End');
+      await page.keyboard.press('Enter');
+      await page.keyboard.type(tipText, { delay: 10 });
+    } catch (e) {
+      console.log("  [bot] Typing text failed:", e.message.split('\n')[0]);
+    }
 
     console.log("  [bot] URL after upload:", page.url());
 
@@ -166,7 +214,12 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
     if (!submitted) throw new Error("Could not submit comment");
 
     console.log("  [bot] Submitted, waiting...");
-    await page.waitForTimeout(5000);
+    try {
+      await page.waitForSelector('div[contenteditable="true"][data-lexical-editor="true"]', {
+        state: "detached",
+        timeout: 15000,
+      });
+    } catch {}
 
     const postPath = path.join(__dirname, "..", "tmp", `post-submit-${Date.now()}.png`);
     try { await page.screenshot({ path: postPath, fullPage: true }); } catch {}
