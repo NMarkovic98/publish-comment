@@ -1,0 +1,5 @@
+node_modules
+auth-state.json
+browser-profile/
+tmp/
+.env
