@@ -3,16 +3,17 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "start": "concurrently -k -n server,tunnel -c green,cyan \"node src/server.js\" \"cloudflared tunnel --url http://localhost:3099\"",
+    "start": "bash start.sh",
     "server": "node src/server.js",
-    "tunnel": "cloudflared tunnel --url http://localhost:3099",
+    "tunnel": "~/.local/bin/cloudflared tunnel --url http://localhost:3099",
     "setup": "node src/setup-auth.js",
-    "stop": "lsof -ti:3099 | xargs kill -9 2>/dev/null; pkill -f 'cloudflared tunnel' 2>/dev/null; exit 0",
+    "stop": "lsof -ti:3099 | xargs kill -9 2>/dev/null; exit 0",
     "kill-server": "lsof -ti:3099 | xargs kill -9 2>/dev/null; exit 0",
-    "restart-server": "lsof -ti:3099 | xargs kill -9 2>/dev/null; sleep 1; node src/server.js",
+    "restart-server": "lsof -ti:3099 | xargs kill -9 2>/dev/null; sleep 1; systemd-run --user --scope --slice=-.slice node src/server.js",
     "restart": "npm run stop && npm start"
   },
   "dependencies": {
+    "claude": "^0.1.1",
     "express": "^4.18.2",
     "multer": "^1.4.5-lts.1",
     "playwright": "^1.44.0"

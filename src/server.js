@@ -91,20 +91,23 @@ app.post("/reply", upload.single("image"), async (req, res) => {
 
     console.log(`[${new Date().toISOString()}] Posting reply to ${redditUrl}`);
 
-    const result = await postReplyToReddit({
+    // Respond immediately so the client (phone) doesn't time out waiting.
+    // The bot keeps running in the background.
+    res.status(202).json({ status: "queued" });
+
+    postReplyToReddit({
       redditUrl,
       imagePath,
       paypalLink: req.body.paypalLink || PAYPAL_LINK,
+    }).then((result) => {
+      try { fs.unlinkSync(imagePath); } catch {}
+      console.log(`[${new Date().toISOString()}] Done: ${result.success ? "OK" : "FAILED - " + result.error}`);
+    }).catch((err) => {
+      try { fs.unlinkSync(imagePath); } catch {}
+      console.error(`[${new Date().toISOString()}] Reply failed:`, err.message);
     });
-
-    // Clean up temp file
-    try { fs.unlinkSync(imagePath); } catch {}
-
-    console.log(`[${new Date().toISOString()}] Done: ${result.success ? "OK" : "FAILED"}`);
-    res.json(result);
   } catch (err) {
     console.error("Reply failed:", err);
-    // Clean up temp file on error
     if (req.file?.path) try { fs.unlinkSync(req.file.path); } catch {}
     res.status(500).json({ error: err.message });
   }

@@ -8,11 +8,14 @@ const AUTH_STATE_PATH = path.join(__dirname, "..", "auth-state.json");
 let persistentContext = null;
 
 async function getContext() {
-  if (persistentContext && persistentContext.pages) {
+  if (persistentContext) {
     try {
+      // pages() throws if the browser was closed
       persistentContext.pages();
       return persistentContext;
-    } catch {}
+    } catch {
+      persistentContext = null;
+    }
   }
 
   persistentContext = await chromium.launchPersistentContext(PROFILE_DIR, {
@@ -34,12 +37,16 @@ async function getContext() {
   return persistentContext;
 }
 
+function ts() { return `[${((Date.now() - ts._start) / 1000).toFixed(1)}s]`; }
+ts._start = Date.now();
+
 async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
+  ts._start = Date.now();
   const context = await getContext();
   const page = await context.newPage();
 
   try {
-    console.log("  [bot] Navigating to", redditUrl);
+    console.log(`  [bot] ${ts()} Navigating to`, redditUrl);
     await page.goto(redditUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
 
     // ── Block client-side navigation to /submit/ ──
@@ -63,7 +70,7 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
         return origReplaceState(...args);
       };
     });
-    console.log("  [bot] Blocked client-side navigation to /submit/");
+    console.log(`  [bot] ${ts()} Blocked client-side navigation to /submit/`);
 
     // Also block HTTP navigation to /submit/
     await page.route('**/submit/**', (route) => {
@@ -72,7 +79,7 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
     });
 
     // ── Step 1: Wait for comment-composer-host ──
-    console.log("  [bot] Waiting for comment-composer-host...");
+    console.log(`  [bot] ${ts()} Waiting for comment-composer-host...`);
     try {
       await page.waitForSelector('comment-composer-host', { timeout: 15000 });
     } catch {
@@ -80,7 +87,7 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
     }
 
     // ── Step 2: Click the trigger to open the rich text editor ──
-    console.log("  [bot] Clicking comment trigger...");
+    console.log(`  [bot] ${ts()} Clicking comment trigger...`);
     // Use Playwright click (not JS evaluate) so the editor actually opens
     try {
       await page.locator('faceplate-textarea-input[data-testid="trigger-button"]').first().click({ timeout: 5000 });
@@ -88,16 +95,16 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
       // Fallback: click the "Join the conversation" area
       await page.locator('comment-composer-host').first().click({ timeout: 5000 });
     }
-    console.log("  [bot] Trigger clicked, waiting for editor...");
+    console.log(`  [bot] ${ts()} Trigger clicked, waiting for editor...`);
 
     // Verify URL didn't change
     console.log("  [bot] URL after trigger:", page.url());
 
     // Wait for the RTE toolbar to appear (proves editor is open)
-    console.log("  [bot] Waiting for editor toolbar...");
+    console.log(`  [bot] ${ts()} Waiting for editor toolbar...`);
     try {
       await page.waitForSelector('div[contenteditable="true"][data-lexical-editor="true"]', { timeout: 10000 });
-      console.log("  [bot] Editor is open");
+      console.log(`  [bot] ${ts()} Editor is open`);
     } catch {
       console.log("  [bot] Editor not found, taking debug screenshot...");
       const debugPath = path.join(__dirname, "..", "tmp", `debug-editor-${Date.now()}.png`);
@@ -110,67 +117,60 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
     await page.locator('div[contenteditable="true"][data-lexical-editor="true"]').first().click();
 
     // ── Step 4: Upload image ──
-    console.log("  [bot] Uploading image:", imagePath);
+    console.log(`  [bot] ${ts()} Uploading image:`, imagePath);
 
-    // Set up network listeners BEFORE triggering the upload so we don't miss anything.
-    // Reddit flow: POST /api/media/asset.json → returns S3 presigned URL →
-    // browser does POST (multipart) to reddit-uploaded-media.s3-accelerate.amazonaws.com
-    const assetPromise = page
-      .waitForResponse(
-        (r) => /\/api\/media\/asset\.json/.test(r.url()) && r.status() < 400,
-        { timeout: 30000 }
-      )
-      .catch(() => null);
-
+    // Wait for S3 upload only — asset.json is unreliable and had a 30s timeout
+    // that was blocking us even after S3 already finished.
     const s3Promise = page
       .waitForResponse(
         (r) =>
           /reddit-uploaded-media.*amazonaws\.com/.test(r.url()) &&
           (r.request().method() === "POST" || r.request().method() === "PUT") &&
           r.status() < 400,
-        { timeout: 180000 }
+        { timeout: 60000 }
       )
       .catch(() => null);
 
     const uploaded = await uploadImage(page, imagePath);
     if (!uploaded) throw new Error("Failed to upload image");
-    console.log("  [bot] Image upload initiated, waiting for network...");
+    console.log(`  [bot] ${ts()} Image upload initiated, waiting for S3...`);
 
-    const assetResp = await assetPromise;
-    console.log("  [bot] asset.json response:", assetResp ? "ok" : "not seen");
     const s3Resp = await s3Promise;
-    console.log("  [bot] S3 upload response:", s3Resp ? "ok" : "not seen");
+    console.log(`  [bot] ${ts()} S3 upload:`, s3Resp ? "ok" : "not seen");
 
     if (!s3Resp) {
-      // Fallback: wait for network idle in case Reddit changed the host
-      console.log("  [bot] S3 not matched, falling back to networkidle...");
+      console.log(`  [bot] ${ts()} S3 not matched, falling back to networkidle...`);
       try {
-        await page.waitForLoadState("networkidle", { timeout: 60000 });
+        await page.waitForLoadState("networkidle", { timeout: 15000 });
       } catch {}
     }
 
-    // Small settle delay for Lexical to swap the blob for the CDN URL
-    await page.waitForTimeout(1500);
-
     // ── Step 5: Add tip text below the image ──
-    console.log("  [bot] Typing tip text...");
+    console.log(`  [bot] ${ts()} Typing tip text...`);
     try {
+      // After image upload, Lexical's DOM looks like:
+      //   <div data-lexical-editor>
+      //     <span data-lexical-decorator contenteditable="false">  ← image, NOT editable
+      //     <p><br></p>                                             ← empty paragraph, editable
+      //   </div>
+      // Click the <p> directly — clicking the container lands on the image.
       const tipText = paypalLink
-        ? `tip is appreciated :) ${paypalLink}`
-        : "tip is appreciated :)";
-      const editor = page.locator('div[contenteditable="true"][data-lexical-editor="true"]').first();
-      await editor.click();
-      await page.keyboard.press('End');
-      await page.keyboard.press('Enter');
-      await page.keyboard.type(tipText, { delay: 10 });
+        ? `Tip is appreciated :) ${paypalLink}`
+        : 'Tip is appreciated :)';
+
+      const lastPara = page.locator('div[data-lexical-editor="true"] p').last();
+      await lastPara.click();
+      await page.waitForTimeout(100);
+      await page.keyboard.type(tipText);
+      console.log(`  [bot] ${ts()} Typed tip text OK`);
     } catch (e) {
-      console.log("  [bot] Typing text failed:", e.message.split('\n')[0]);
+      console.log(`  [bot] ${ts()} Typing/link failed:`, e.message.split('\n')[0]);
     }
 
     console.log("  [bot] URL after upload:", page.url());
 
     // ── Step 6: Submit ──
-    console.log("  [bot] Submitting comment...");
+    console.log(`  [bot] ${ts()} Submitting comment...`);
 
     let submitted = false;
 
@@ -213,26 +213,31 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
 
     if (!submitted) throw new Error("Could not submit comment");
 
-    console.log("  [bot] Submitted, waiting...");
+    console.log(`  [bot] ${ts()} Submitted, waiting...`);
+    // Wait for editor to close OR 5s max — don't block on this
     try {
       await page.waitForSelector('div[contenteditable="true"][data-lexical-editor="true"]', {
         state: "detached",
-        timeout: 15000,
+        timeout: 5000,
       });
     } catch {}
 
     const postPath = path.join(__dirname, "..", "tmp", `post-submit-${Date.now()}.png`);
     try { await page.screenshot({ path: postPath, fullPage: true }); } catch {}
-    console.log("  [bot] Post-submit screenshot:", postPath);
+    console.log(`  [bot] ${ts()} DONE. Post-submit screenshot:`, postPath);
 
     try { await page.unroute('**/submit/**'); } catch {}
     await page.close();
     return { success: true };
   } catch (err) {
+    // If Chrome was closed externally, reset so next request relaunches it
+    if (err.message.includes('closed') || err.message.includes('Target page')) {
+      persistentContext = null;
+    }
     const sp = path.join(__dirname, "..", "tmp", `error-${Date.now()}.png`);
     try { await page.screenshot({ path: sp, fullPage: true }); } catch {}
     try { await page.unroute('**/submit/**'); } catch {}
-    await page.close();
+    try { await page.close(); } catch {}
     return { success: false, error: err.message, screenshot: sp };
   }
 }
