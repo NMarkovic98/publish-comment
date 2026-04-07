@@ -10,7 +10,6 @@ let persistentContext = null;
 async function getContext() {
   if (persistentContext) {
     try {
-      // pages() throws if the browser was closed
       persistentContext.pages();
       return persistentContext;
     } catch {
@@ -18,11 +17,18 @@ async function getContext() {
     }
   }
 
+  console.log("  [bot] Launching Chrome...");
   persistentContext = await chromium.launchPersistentContext(PROFILE_DIR, {
     headless: false,
     channel: "chrome",
     viewport: { width: 1280, height: 900 },
     args: ["--disable-blink-features=AutomationControlled"],
+  });
+
+  // Auto-reset when Chrome closes so next request relaunches it
+  persistentContext.on("close", () => {
+    console.log("  [bot] Chrome closed, will relaunch on next request");
+    persistentContext = null;
   });
 
   if (fs.existsSync(AUTH_STATE_PATH)) {
@@ -42,8 +48,16 @@ ts._start = Date.now();
 
 async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
   ts._start = Date.now();
-  const context = await getContext();
-  const page = await context.newPage();
+  let context = await getContext();
+  let page;
+  try {
+    page = await context.newPage();
+  } catch {
+    // Chrome died between the check and newPage — reset and relaunch
+    persistentContext = null;
+    context = await getContext();
+    page = await context.newPage();
+  }
 
   try {
     console.log(`  [bot] ${ts()} Navigating to`, redditUrl);
@@ -158,9 +172,37 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
         ? `Tip is appreciated :) ${paypalLink}`
         : 'Tip is appreciated :)';
 
+      // Wait for the empty <p> that Lexical creates after the image
+      try {
+        await page.waitForSelector('div[data-lexical-editor="true"] p', { timeout: 5000 });
+      } catch {
+        console.log(`  [bot] ${ts()} No <p> in editor yet`);
+      }
+
+      // Click the last <p> directly (the empty one after the image)
       const lastPara = page.locator('div[data-lexical-editor="true"] p').last();
       await lastPara.click();
-      await page.waitForTimeout(100);
+      // Verify focus landed in the editor, not somewhere else
+      const focused = await page.evaluate(() => {
+        const ed = document.querySelector('div[data-lexical-editor="true"]');
+        return ed && ed.contains(document.activeElement);
+      });
+      console.log(`  [bot] ${ts()} Editor focused after click:`, focused);
+      if (!focused) {
+        // Force focus via JS
+        await page.evaluate(() => {
+          const p = document.querySelector('div[data-lexical-editor="true"] p:last-of-type');
+          if (p) p.focus();
+        });
+        await page.waitForTimeout(100);
+      }
+      await page.waitForTimeout(200);
+
+      // Debug screenshot before typing — check tmp/ folder if text doesn't appear
+      const preTypePath = path.join(__dirname, "..", "tmp", `pre-type-${Date.now()}.png`);
+      try { await page.screenshot({ path: preTypePath }); } catch {}
+      console.log(`  [bot] ${ts()} Pre-type screenshot:`, preTypePath);
+
       await page.keyboard.type(tipText);
       console.log(`  [bot] ${ts()} Typed tip text OK`);
     } catch (e) {
