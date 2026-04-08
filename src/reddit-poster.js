@@ -168,9 +168,7 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
       //     <p><br></p>                                             ← empty paragraph, editable
       //   </div>
       // Click the <p> directly — clicking the container lands on the image.
-      const tipText = paypalLink
-        ? `Tip is appreciated :) ${paypalLink}`
-        : 'Tip is appreciated :)';
+      const linkText = 'Tip is appreciated :)';
 
       // Wait for the empty <p> that Lexical creates after the image
       try {
@@ -179,32 +177,79 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
         console.log(`  [bot] ${ts()} No <p> in editor yet`);
       }
 
-      // Click the last <p> directly (the empty one after the image)
-      const lastPara = page.locator('div[data-lexical-editor="true"] p').last();
-      await lastPara.click();
-      // Verify focus landed in the editor, not somewhere else
-      const focused = await page.evaluate(() => {
-        const ed = document.querySelector('div[data-lexical-editor="true"]');
-        return ed && ed.contains(document.activeElement);
+      // Use Selection API to place cursor in the last <p>
+      const cursorPlaced = await page.evaluate(() => {
+        const editor = document.querySelector('div[data-lexical-editor="true"]');
+        if (!editor) return false;
+        const paragraphs = editor.querySelectorAll('p');
+        const lastP = paragraphs[paragraphs.length - 1];
+        if (!lastP) return false;
+        editor.focus();
+        const range = document.createRange();
+        range.selectNodeContents(lastP);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return true;
       });
-      console.log(`  [bot] ${ts()} Editor focused after click:`, focused);
-      if (!focused) {
-        // Force focus via JS
-        await page.evaluate(() => {
-          const p = document.querySelector('div[data-lexical-editor="true"] p:last-of-type');
-          if (p) p.focus();
-        });
-        await page.waitForTimeout(100);
-      }
+      console.log(`  [bot] ${ts()} Cursor placed via Selection API:`, cursorPlaced);
       await page.waitForTimeout(200);
 
-      // Debug screenshot before typing — check tmp/ folder if text doesn't appear
-      const preTypePath = path.join(__dirname, "..", "tmp", `pre-type-${Date.now()}.png`);
-      try { await page.screenshot({ path: preTypePath }); } catch {}
-      console.log(`  [bot] ${ts()} Pre-type screenshot:`, preTypePath);
-
-      await page.keyboard.type(tipText);
+      await page.keyboard.type(linkText);
       console.log(`  [bot] ${ts()} Typed tip text OK`);
+
+      if (paypalLink) {
+        // Select the typed text
+        await page.keyboard.press('Home');
+        await page.waitForTimeout(100);
+        await page.keyboard.press('Shift+End');
+        await page.waitForTimeout(100);
+
+        // Open formatting toolbar if hidden, then click Link button
+        const toolbarVisible = await page.evaluate(() => {
+          const toolbar = document.querySelector('rte-toolbar[part="toolbar-top"]');
+          return toolbar && !toolbar.classList.contains('hidden');
+        });
+        if (!toolbarVisible) {
+          // Click "Show formatting options" button
+          const showFmt = page.locator('rte-toolbar-button[screenreadercontent="Show formatting options"] button');
+          await showFmt.click({ timeout: 5000 });
+          await page.waitForTimeout(300);
+          console.log(`  [bot] ${ts()} Opened formatting toolbar`);
+        }
+
+        // Click the Link button in the toolbar
+        const linkBtn = page.locator('rte-toolbar-button-link button');
+        await linkBtn.click({ timeout: 5000 });
+        await page.waitForTimeout(500);
+        console.log(`  [bot] ${ts()} Clicked link button`);
+
+        // Wait for the link modal to appear
+        await page.waitForSelector('faceplate-text-input[name="url"]', { timeout: 5000 });
+        await page.waitForTimeout(300);
+
+        // Focus the URL input inside shadow DOM and type via keyboard
+        await page.evaluate(() => {
+          const host = document.querySelector('faceplate-text-input[name="url"]');
+          const input = host?.shadowRoot?.querySelector('input[name="url"]');
+          if (input) input.focus();
+        });
+        await page.waitForTimeout(200);
+        // Clear existing value then type PayPal link
+        await page.keyboard.press('Control+a');
+        await page.keyboard.type(paypalLink);
+        await page.waitForTimeout(300);
+
+        // Click Save button
+        await page.evaluate(() => {
+          const btn = document.querySelector('button[data-testid="btn-save-link"]');
+          if (btn) btn.click();
+        });
+        await page.waitForTimeout(300);
+        await page.waitForTimeout(300);
+        console.log(`  [bot] ${ts()} Link inserted`);
+      }
     } catch (e) {
       console.log(`  [bot] ${ts()} Typing/link failed:`, e.message.split('\n')[0]);
     }
