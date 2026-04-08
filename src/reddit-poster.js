@@ -168,7 +168,14 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
       //     <p><br></p>                                             ← empty paragraph, editable
       //   </div>
       // Click the <p> directly — clicking the container lands on the image.
-      const linkText = 'Tip is appreciated :)';
+      const messages = [
+        "Hope this works for you! Let me know if you'd like any tweaks 😊",
+        "Here's my edit! Feel free to ask for any adjustments.",
+        "Hope this is what you had in mind! Happy to make changes if needed.",
+        "Hope you like it! Let me know if you'd like anything changed 😊",
+        "Here's my take on it! Feel free to ask for any tweaks.",
+      ];
+      const linkText = messages[Math.floor(Math.random() * messages.length)];
 
       // Wait for the empty <p> that Lexical creates after the image
       try {
@@ -196,11 +203,16 @@ async function postReplyToReddit({ redditUrl, imagePath, paypalLink }) {
       console.log(`  [bot] ${ts()} Cursor placed via Selection API:`, cursorPlaced);
       await page.waitForTimeout(200);
 
+      // Type the random message as plain text, then new line, then the tip link text
       await page.keyboard.type(linkText);
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(100);
+      const tipLinkText = 'Tip is appreciated :)';
+      await page.keyboard.type(tipLinkText);
       console.log(`  [bot] ${ts()} Typed tip text OK`);
 
       if (paypalLink) {
-        // Select the typed text
+        // Select only the tip link text
         await page.keyboard.press('Home');
         await page.waitForTimeout(100);
         await page.keyboard.press('Shift+End');
