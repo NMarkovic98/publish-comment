@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "start": "bash start.sh",
+    "start:win": "start.bat",
     "server": "node src/server.js",
     "tunnel": "~/.local/bin/cloudflared tunnel --url http://localhost:3099",
     "setup": "node src/setup-auth.js",
